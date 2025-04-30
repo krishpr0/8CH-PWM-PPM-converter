@@ -1,0 +1,124 @@
+```
+// 8-channel PWM to PPM converter for Arduino Pro Mini
+// PWM inputs on pins 2-9, PPM output on pin 10
+// Prints received PWM values to Serial monitor
+
+#include <avr/interrupt.h>
+
+#define PPM_PIN 10
+#define CHANNELS 8
+const uint8_t inputPins[CHANNELS] = {2, 3, 4, 5, 6, 7, 8, 9};
+
+volatile uint16_t pwmValues[CHANNELS] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
+volatile uint8_t currentPinState = 0;
+volatile uint8_t prevPinState = 0;
+volatile unsigned long lastRise[CHANNELS] = {0};
+volatile bool newData = false;
+
+#define PPM_FRAME_LENGTH 22500  // 22.5ms
+#define PPM_PULSE_LENGTH 400    // 400µs pulse
+#define PPM_MIN_CHANNEL 1000    // 1000µs
+#define PPM_MAX_CHANNEL 2000    // 2000µs
+#define PPM_SYNC_MIN 4000       // Sync pulse > 4ms
+
+void setup() {
+  // Configure input pins
+  for (uint8_t i = 0; i < CHANNELS; i++) {
+    pinMode(inputPins[i], INPUT);
+  }
+  
+  // Configure PPM output pin
+  pinMode(PPM_PIN, OUTPUT);
+  digitalWrite(PPM_PIN, LOW);
+  
+  // Initialize Serial communication
+  Serial.begin(115200);
+  
+  // Enable pin change interrupts for input pins
+  PCICR |= (1 << PCIE2);  // Enable PCINT2 (pins D0-D7)
+  PCICR |= (1 << PCIE0);  // Enable PCINT0 (pins D8-D13)
+  PCMSK2 |= (1 << PCINT18) | (1 << PCINT19) | (1 << PCINT20) | (1 << PCINT21) |
+            (1 << PCINT22) | (1 << PCINT23);  // Pins D2-D7
+  PCMSK0 |= (1 << PCINT0) | (1 << PCINT1);    // Pins D8-D9
+  
+  // Start PPM generation
+  startPPM();
+}
+
+ISR(PCINT0_vect) { handlePinChange(); }
+ISR(PCINT2_vect) { handlePinChange(); }
+
+void handlePinChange() {
+  unsigned long now = micros();
+  currentPinState = PIND >> 2;  // Read D2-D7
+  currentPinState |= (PINB & 0x03) << 6;  // Read D8-D9
+  
+  for (uint8_t i = 0; i < CHANNELS; i++) {
+    uint8_t mask = 1 << (inputPins[i] - (inputPins[i] < 8 ? 2 : 0));
+    if ((currentPinState & mask) && !(prevPinState & mask)) {
+      // Rising edge
+      lastRise[i] = now;
+    } else if (!(currentPinState & mask) && (prevPinState & mask)) {
+      // Falling edge
+      uint16_t pulseWidth = now - lastRise[i];
+      if (pulseWidth >= PPM_MIN_CHANNEL && pulseWidth <= PPM_MAX_CHANNEL) {
+        pwmValues[i] = pulseWidth;
+        newData = true;
+      }
+    }
+  }
+  prevPinState = currentPinState;
+}
+
+void startPPM() {
+  cli();  // Disable interrupts
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+  OCR1A = 100;  // Initial compare value
+  TCCR1B |= (1 << WGM12);  // CTC mode
+  TCCR1B |= (1 << CS11);   // Prescaler 8 (2MHz)
+  TIMSK1 |= (1 << OCIE1A); // Enable compare interrupt
+  sei();  // Enable interrupts
+}
+
+volatile uint16_t ppmTimes[CHANNELS + 1];
+volatile uint8_t ppmIndex = 0;
+
+ISR(TIMER1_COMPA_vect) {
+  static unsigned long nextTime = 0;
+  unsigned long now = micros();
+  
+  if (ppmIndex == 0) {
+    digitalWrite(PPM_PIN, HIGH);
+    OCR1A = PPM_PULSE_LENGTH * 2;  // 400µs pulse
+    nextTime = now + PPM_PULSE_LENGTH;
+    ppmIndex++;
+  } else if (ppmIndex <= CHANNELS) {
+    digitalWrite(PPM_PIN, LOW);
+    uint16_t channelValue = constrain(pwmValues[ppmIndex - 1], PPM_MIN_CHANNEL, PPM_MAX_CHANNEL);
+    OCR1A = (channelValue - PPM_PULSE_LENGTH) * 2;
+    nextTime += channelValue;
+    ppmIndex++;
+  } else {
+    digitalWrite(PPM_PIN, HIGH);
+    unsigned long frameTime = PPM_FRAME_LENGTH - (nextTime - now);
+    OCR1A = frameTime * 2;
+    ppmIndex = 0;
+  }
+}
+
+void loop() {
+  if (newData) {
+    newData = false;  // Reset flag
+    Serial.print("PWM Values: ");
+    for (uint8_t i = 0; i < CHANNELS; i++) {
+      Serial.print("Ch");
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(pwmValues[i]);
+      if (i < CHANNELS - 1) Serial.print(", ");
+    }
+    Serial.println();
+  }
+}```
