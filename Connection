@@ -1,0 +1,4 @@
+PWM Inputs: 8 channels from the RC receiver connected to Arduino digital pins 2 to 9.
+
+
+PPM Output Pin: 10 
